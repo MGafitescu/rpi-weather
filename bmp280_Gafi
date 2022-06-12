@@ -6,92 +6,127 @@ import requests
 from bmp280 import BMP280
 from datetime import datetime, timedelta
 import traceback
+import configparser
 
 try:
     from smbus2 import SMBus
 except ImportError:
     from smbus import SMBus
 
-print("""temperature-and-pressure.py - Displays the temperature and pressure.
+ALTITUDE = 380
+URL_THINGER_CALLBACK = 'https://backend.thinger.io/v3/users/MGafi/devices/Rpi/callback/data'
+URL_THINGER_BUCKETS = 'https://api.thinger.io/v1/users/MGafi/buckets/Rpi/data?min_ts='
 
-Press Ctrl+C to exit!
 
-""")
+def get_temperature():
+    temperature_primary = bmp280_primary.get_temperature()
+    temperature_secondary = bmp280_secondary_.get_temperature()
+    return (temperature_primary + temperature_secondary) / 2
+
+
+def get_pressure():
+    pressure_primary = bmp280_primary.get_pressure()
+    pressure_secondary = bmp280_secondary_.get_pressure()
+    return (pressure_primary + pressure_secondary) / 2
+
+
+def calculate_delta_and_trend(last_3_pressures, token):
+    try:
+        if len(last_3_pressures) == 0:
+            last_3_pressures = [pressure, pressure, pressure]
+        else:
+            last_3_pressures[0] = last_3_pressures[1]
+            last_3_pressures[1] = last_3_pressures[2]
+            last_3_pressures[2] = pressure
+
+        avg_pressure = sum(last_3_pressures) / len(last_3_pressures)
+
+        time_3_hours_ago = datetime.now() - timedelta(hours=3)
+        beginning = time_3_hours_ago - timedelta(minutes=2)
+        end = time_3_hours_ago + timedelta(minutes=1)
+
+        min_ts = str(int(beginning.timestamp() * 1000))
+        max_ts = str(int(end.timestamp() * 1000))
+
+        get_url = URL_THINGER_BUCKETS + str(min_ts) + "&max_ts=" + str(max_ts)
+        get_headers = {'Authorization': token}
+        response = requests.get(get_url, headers=get_headers)
+        print(response.status_code)
+        data=response.json()
+
+
+        pressures = 0
+        counts = 0
+        for item in data:
+            pressures = pressures + item.get("val").get("pressure")
+            counts = counts + 1
+        avg_pressure_3_hours_ago = pressures / counts
+
+        delta_baro = round(avg_pressure - avg_pressure_3_hours_ago, 2)
+        if delta_baro > 6.0:
+            trend = "Rising Very Rapidly"
+        elif delta_baro > 3.6:
+            trend = "Rising Quickly"
+        elif delta_baro > 1.6:
+            trend = "Rising"
+        elif delta_baro > 0.1:
+            trend = "Rising Slowly"
+        elif delta_baro > -0.1:
+            trend = "Steady"
+        elif delta_baro > -1.6:
+            trend = "Falling Slowly"
+        elif delta_baro > -3.6:
+            trend = "Falling"
+        elif delta_baro > -6.0:
+            trend = "Falling Quickly"
+        else:
+            trend = "Falling Very Rapidly"
+    except Exception as e:
+        traceback.print_exc()
+        trend = "Couldn't calculate"
+        delta_baro = 0.0
+    return delta_baro, trend
+
 
 # Initialise the BMP280
 bus = SMBus(1)
-bmp280 = BMP280(i2c_dev=bus)
-bmp280_other = BMP280(i2c_addr=0x77,i2c_dev=bus)
-last_3_pressures=[]
+bmp280_primary = BMP280(i2c_dev=bus)
+bmp280_secondary_ = BMP280(i2c_addr=0x77, i2c_dev=bus)
+last_3_pressures = []
+config = configparser.ConfigParser()
+config.read("token.ini")
+token = config['Authentication']['Token']
+print(token)
 
 while True:
-	start_time=time.time()
-	temperature_1 = bmp280.get_temperature()
-	pressure_1 = bmp280.get_pressure()
-	temperature_2 = bmp280_other.get_temperature()
-	pressure_2 = bmp280_other.get_pressure()
-	temperature=(temperature_1 + temperature_2)/2
-	pressure=(pressure_1 + pressure_2)/2
-	print('{:05.2f}*C {:05.2f}hPa'.format(temperature, pressure))
-	altitude=380
-	sea_level_pressure=pressure / pow(1.0 - (altitude / 44330.0), 5.255)
-	sea_level_pressure_adjusted=pressure*pow((1-(0.0065*altitude)/(temperature+0.0065*altitude+273.15)),-5.257)
-	strTrend='Unknown'
-	try:
-		if len(last_3_pressures)==0 :
-			last_3_pressures = [pressure, pressure, pressure]
-		else:
-			last_3_pressures[0]=last_3_pressures[1]
-			last_3_pressures[1]=last_3_pressures[2]
-			last_3_pressures[2]=pressure
+    start_time = time.time()
+    temperature = get_temperature()
+    pressure = get_pressure()
+    print('{:05.2f}*C {:05.2f}hPa'.format(temperature, pressure))
 
-		avg_pressure = (last_3_pressures[0]+last_3_pressures[1]+last_3_pressures[2])/3
+    sea_level_pressure = pressure / pow(1.0 - (ALTITUDE / 44330.0), 5.255)
+    sea_level_pressure_adjusted = pressure * pow((1 - (0.0065 * ALTITUDE) / (temperature + 0.0065 * ALTITUDE + 273.15)),
+                                                 -5.257)
+    print('{:05.2f}hPa {:05.2f}hPa'.format(sea_level_pressure, sea_level_pressure_adjusted))
+    delta_baro, str_trend = calculate_delta_and_trend(last_3_pressures, config['Authentication']['Token'])
 
-		time_3_hours_ago=datetime.now()-timedelta(hours=3)
-		beginning = time_3_hours_ago - timedelta(minutes=2)
-		end = time_3_hours_ago + timedelta(minutes=1)
+    print(delta_baro)
+    print(str_trend)
 
-		min_ts = str(int(beginning.timestamp() * 1000))
-		max_ts = str(int(end.timestamp()*1000))
+    weather_data = {'temperature': round(temperature, 2),
+                    'pressure': round(pressure, 2),
+                    'sea_pressure': round(sea_level_pressure, 2),
+                    'sea_adjusted_pressure': round(sea_level_pressure_adjusted, 2),
+                    'trend': str_trend,
+                    'delta_baro': delta_baro}
+    headers = {'Content-Type': 'application/json;charset=UTF-8', 'Authorization': token}
+    try:
+        response = requests.post(URL_THINGER_CALLBACK, data=json.dumps(weather_data), headers=headers)
+        print(response.status_code)
+    except Exception as e:
+        traceback.print_exc()
 
-		get_url = "https://api.thinger.io/v1/users/MGafi/buckets/Rpi/data?min_ts="+str(min_ts)+"&max_ts="+str(max_ts)
-		get_headers = {'Authorization': 'Bearer '}
-		data = requests.get(get_url,headers=get_headers).json()
-		pressures = 0
-		counts = 0
-		for item in data:
-			pressures = pressures + item.get("val").get("pressure")
-			counts = counts+1
-		avg_pressure_3_hours_ago = pressures/counts
-
-		deltaBaro = round(avg_pressure,2) - round(avg_pressure_3_hours_ago,2)
-		if deltaBaro > 6.0:
-     			strTrend = "Rising Very Rapidly"
-		elif deltaBaro > 3.6:
-     			strTrend = "Rising Quickly"
-		elif deltaBaro > 1.6:
-     			strTrend = "Rising"
-		elif deltaBaro > 0.1:
-    			strTrend = "Rising Slowly"
-		elif deltaBaro > -0.1:
-     			strTrend = "Steady"
-		elif deltaBaro > -1.6:
-     			strTrend = "Falling Slowly"
-		elif deltaBaro > -3.6:
-     			strTrend = "Falling"
-		elif deltaBaro > -6.0:
-     			strTrend = "Falling Quickly"
-		else:
-     			strTrend = "Falling Very Rapidly"
-	except Exception as e:
-		traceback.print_exc()
-		strTrend="Couldn't calculate"
-	print(strTrend)
-	weather_data = {'temperature': round(temperature,2), 'pressure': round(pressure,2), 'sea_pressure': round(sea_level_pressure,2), 'sea_adjusted_pressure': round(sea_level_pressure_adjusted,2),'trend':strTrend}
-	headers= {'Content-Type': 'application/json;charset=UTF-8', 'Authorization': 'Bearer '}
-	url_thinger = 'https://backend.thinger.io/v3/users/MGafi/devices/Rpi/callback/data'
-	requests.post(url_thinger,data=json.dumps(weather_data),headers=headers)
-	worked_time=time.time()-start_time
-	wait_to_align=60.0 - worked_time%60.0
-	time.sleep(wait_to_align)
-	
+    worked_time = time.time() - start_time
+    wait_to_align = 60.0 - worked_time % 60.0
+    break
+    time.sleep(wait_to_align)
