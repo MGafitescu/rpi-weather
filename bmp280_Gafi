@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import traceback
 import configparser
 
+
 try:
     from smbus2 import SMBus
 except ImportError:
@@ -16,6 +17,39 @@ except ImportError:
 ALTITUDE = 380
 URL_THINGER_CALLBACK = 'https://backend.thinger.io/v3/users/MGafi/devices/Rpi/callback/data'
 URL_THINGER_BUCKETS = 'https://api.thinger.io/v1/users/MGafi/buckets/Rpi/data?min_ts='
+
+
+def _(msg): return msg
+
+
+forecast_text = {
+    'A': _("Settled fine"),
+    'B': _("Fine weather"),
+    'C': _("Becoming fine"),
+    'D': _("Fine, becoming less settled"),
+    'E': _("Fine, possible showers"),
+    'F': _("Fairly fine, improving"),
+    'G': _("Fairly fine, possible showers early"),
+    'H': _("Fairly fine, showery later"),
+    'I': _("Showery early, improving"),
+    'J': _("Changeable, mending"),
+    'K': _("Fairly fine, showers likely"),
+    'L': _("Rather unsettled clearing later"),
+    'M': _("Unsettled, probably improving"),
+    'N': _("Showery, bright intervals"),
+    'O': _("Showery, becoming less settled"),
+    'P': _("Changeable, some rain"),
+    'Q': _("Unsettled, short fine intervals"),
+    'R': _("Unsettled, rain later"),
+    'S': _("Unsettled, some rain"),
+    'T': _("Mostly very unsettled"),
+    'U': _("Occasional rain, worsening"),
+    'V': _("Rain at times, very unsettled"),
+    'W': _("Rain at frequent intervals"),
+    'X': _("Rain, very unsettled"),
+    'Y': _("Stormy, may improve"),
+    'Z': _("Stormy, much rain")
+}
 
 
 def get_temperature():
@@ -30,7 +64,7 @@ def get_pressure():
     return (pressure_primary + pressure_secondary) / 2
 
 
-def calculate_delta_and_trend(last_3_pressures, token):
+def calculate_delta_and_trend(last_3_pressures, token, current_time):
     try:
         if len(last_3_pressures) == 0:
             last_3_pressures = [pressure, pressure, pressure]
@@ -41,7 +75,7 @@ def calculate_delta_and_trend(last_3_pressures, token):
 
         avg_pressure = sum(last_3_pressures) / len(last_3_pressures)
 
-        time_3_hours_ago = datetime.now() - timedelta(hours=3)
+        time_3_hours_ago = current_time - timedelta(hours=3)
         beginning = time_3_hours_ago - timedelta(minutes=2)
         end = time_3_hours_ago + timedelta(minutes=1)
 
@@ -52,8 +86,7 @@ def calculate_delta_and_trend(last_3_pressures, token):
         get_headers = {'Authorization': token}
         response = requests.get(get_url, headers=get_headers)
         print(response.status_code)
-        data=response.json()
-
+        data = response.json()
 
         pressures = 0
         counts = 0
@@ -88,15 +121,81 @@ def calculate_delta_and_trend(last_3_pressures, token):
     return delta_baro, trend
 
 
+def ZambrettiCode(pressure, month, wind, trend,
+                  north=True, baro_top=1050.0, baro_bottom=950.0):
+    """Simple implementation of Zambretti forecaster algorithm.
+    Inspired by beteljuice.com Java algorithm, as converted to Python by
+    honeysucklecottage.me.uk, and further information
+    from http://www.meteormetrics.com/zambretti.htm"""
+    # normalise pressure
+    pressure = 950.0 + ((1050.0 - 950.0) *
+                        (pressure - baro_bottom) / (baro_top - baro_bottom))
+    # adjust pressure for wind direction
+    if wind != None:
+        if not north:
+            # southern hemisphere, so add 180 degrees
+            wind = (wind + 8) % 16
+        pressure += (5.2, 4.2, 3.2, 1.05, -1.1, -3.15, -5.2, -8.35,
+                     -11.5, -9.4, -7.3, -5.25, -3.2, -1.15, 0.9, 3.05)[wind]
+    # compute base forecast from pressure and trend (hPa / hour)
+    if trend >= 1.6:
+        # rising pressure
+        if north == (month >= 4 and month <= 9):
+            pressure += 3.2
+        F = 0.1740 * (1031.40 - pressure)
+        LUT = ('A', 'B', 'B', 'C', 'F', 'G', 'I', 'J', 'L', 'M', 'M', 'Q', 'T',
+               'Y')
+    elif trend <= -1.6:
+        # falling pressure
+        if north == (month >= 4 and month <= 9):
+            pressure -= 3.2
+        F = 0.1553 * (1029.95 - pressure)
+        LUT = ('B', 'D', 'H', 'O', 'R', 'U', 'V', 'X', 'X', 'Z')
+    else:
+        # steady
+        F = 0.2314 * (1030.81 - pressure)
+        LUT = ('A', 'B', 'B', 'B', 'E', 'K', 'N', 'N', 'P', 'P', 'S', 'W', 'W',
+               'X', 'X', 'X', 'Z')
+    # clip to range of lookup table
+    F = min(max(int(F + 0.5), 0), len(LUT) - 1)
+    # convert to letter code
+    return LUT[F]
+
+
+def ZambrettiText(letter):
+    return forecast_text[letter]
+
+
+def getForecastRegularRange(pressure, trend):
+    month = datetime.now().month
+    letter = ZambrettiCode(pressure, month, None, trend, north=True, baro_bottom=950, baro_top=1050)
+    return ZambrettiText(letter)
+
+
+def getForecastAdjustedRange(pressure, trend):
+    month = datetime.now().month
+    letter = ZambrettiCode(pressure, month, None, trend, north=True, baro_bottom=970, baro_top=1040)
+    return ZambrettiText(letter)
+
+
 # Initialise the BMP280
 bus = SMBus(1)
 bmp280_primary = BMP280(i2c_dev=bus)
 bmp280_secondary_ = BMP280(i2c_addr=0x77, i2c_dev=bus)
 last_3_pressures = []
 config = configparser.ConfigParser()
-config.read("token.ini")
+config.read("/usr/local/bin/rpi-weather/token.ini")
+print(config)
 token = config['Authentication']['Token']
 print(token)
+fr_0 = "Not calculated"
+fr_1 = "Not calculated"
+fr_2 = "Not calculated"
+fr_3 = "Not calculated"
+fr_4 = "Not calculated"
+fr_5 = "Not calculated"
+fr_6 = "Not calculated"
+fr_7 = "Not calculated"
 
 while True:
     start_time = time.time()
@@ -108,17 +207,43 @@ while True:
     sea_level_pressure_adjusted = pressure * pow((1 - (0.0065 * ALTITUDE) / (temperature + 0.0065 * ALTITUDE + 273.15)),
                                                  -5.257)
     print('{:05.2f}hPa {:05.2f}hPa'.format(sea_level_pressure, sea_level_pressure_adjusted))
-    delta_baro, str_trend = calculate_delta_and_trend(last_3_pressures, config['Authentication']['Token'])
+
+    current_time = datetime.now()
+    delta_baro, str_trend = calculate_delta_and_trend(last_3_pressures, token, current_time)
 
     print(delta_baro)
     print(str_trend)
+    minute =  current_time.minute
+    hour =  current_time.hour
+
+    if minute == 0 or minute == 1:
+        fr_4 = getForecastRegularRange(sea_level_pressure, delta_baro)
+        fr_5 = getForecastRegularRange(sea_level_pressure_adjusted, delta_baro)
+        fr_6 = getForecastAdjustedRange(sea_level_pressure, delta_baro)
+        fr_7 = getForecastAdjustedRange(sea_level_pressure_adjusted, delta_baro)
+
+        if hour == 9 or hour == 21:
+            fr_0 = getForecastRegularRange(sea_level_pressure, delta_baro)
+            fr_1 = getForecastRegularRange(sea_level_pressure_adjusted, delta_baro)
+            fr_2 = getForecastAdjustedRange(sea_level_pressure, delta_baro)
+            fr_3 = getForecastAdjustedRange(sea_level_pressure_adjusted, delta_baro)
 
     weather_data = {'temperature': round(temperature, 2),
                     'pressure': round(pressure, 2),
                     'sea_pressure': round(sea_level_pressure, 2),
                     'sea_adjusted_pressure': round(sea_level_pressure_adjusted, 2),
                     'trend': str_trend,
-                    'delta_baro': delta_baro}
+                    'delta_baro': delta_baro,
+                    'forecast_9_sl_rr': fr_0,
+                    'forecast_9_sla_rr': fr_1,
+                    'forecast_9_sl_ar': fr_2,
+                    'forecast_9_sla_ar': fr_3,
+                    'forecast_sl_rr': fr_4,
+                    'forecast_sla_rr': fr_5,
+                    'forecast_sl_ar': fr_6,
+                    'forecast_sla_ar': fr_7
+                    }
+
     headers = {'Content-Type': 'application/json;charset=UTF-8', 'Authorization': token}
     try:
         response = requests.post(URL_THINGER_CALLBACK, data=json.dumps(weather_data), headers=headers)
@@ -128,5 +253,4 @@ while True:
 
     worked_time = time.time() - start_time
     wait_to_align = 60.0 - worked_time % 60.0
-    break
     time.sleep(wait_to_align)
