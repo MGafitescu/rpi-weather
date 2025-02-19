@@ -53,15 +53,39 @@ forecast_text = {
 
 
 def get_temperature():
-    temperature_primary = bmp280_primary.get_temperature()
-    temperature_secondary = bmp280_secondary_.get_temperature()
-    return (temperature_primary + temperature_secondary) / 2
+    try:
+        temperature_primary = bmp280_primary.get_temperature()
+        temperature_secondary = bmp280_secondary_.get_temperature()
+        return (temperature_primary + temperature_secondary) / 2
+    except:
+        try:
+           temperature_primary = bmp280_primary.get_temperature()
+           return temperature_primary
+        except:
+           try:
+              temperature_secondary = bmp280_secondary_.get_temperature()
+              return temperature_secondary
+           except:
+                 return 0
+    return 0
 
 
 def get_pressure():
-    pressure_primary = bmp280_primary.get_pressure()
-    pressure_secondary = bmp280_secondary_.get_pressure()
-    return (pressure_primary + pressure_secondary) / 2
+    try:
+        pressure_primary = bmp280_primary.get_pressure()
+        pressure_secondary = bmp280_secondary_.get_pressure()
+        return (pressure_primary + pressure_secondary) / 2
+    except:
+       try:
+           pressure_primary = bmp280_primary.get_pressure()
+           return pressure_primary
+       except:
+           try:
+              pressure_secondary = bmp280_secondary_.get_pressure()
+              return pressure_secondary
+           except:
+                 return 0
+    return 0
 
 
 def calculate_delta_and_trend(last_3_pressures, token, current_time):
